@@ -41,39 +41,37 @@
  * @var  k_i             Integral gain value (used to compute `error_i`)
  * @var  k_d             Derivative gain value (used to compute `error_d`)
  */
+#pragma once
 class PID {
- public:
-  double lim_max_output;
-  double lim_min_output;
-  double delta_t;
-  double error_p;
-  double error_i;
-  double error_d;
-  double k_p;
-  double k_i;
-  double k_d;
-
+public:
   PID();
-  virtual ~PID();
+  ~PID();
 
-  // Initialises the PID controller with the given parameter values
-  void init_controller(
-      double k_p,
-      double k_i,
-      double k_d,
-      double lim_max_output,
-      double lim_min_output
-  );
-  // Updates the PID controller error terms given the cross-track error
-  void update_error(
-      double cte
-  );
-  // Computes the total error for the PID controller
+  void init_controller(double k_p, double k_i, double k_d,
+                       double lim_max_output, double lim_min_output,
+                       double lim_max_integral = 0.5,   // clamp I term
+                       double d_filter_tau = 0.0);      // 0 = no filtering
+
+  void update_error(double cte, bool allow_integrate = true);
   double total_error();
-  // Updates $\Delta t$ to the given value
-  double update_delta_time(
-      double new_delta_time
-  );
+  double update_delta_time(double new_delta_time);
+
+  // utility: reset integral
+  void reset_integral() { error_i = 0.0; }
+
+private:
+  double k_p{0}, k_i{0}, k_d{0};
+  double lim_max_output{1}, lim_min_output{-1};
+  double lim_max_integral{0.5};
+
+  double delta_t{0};
+  double error_p{0}, error_i{0}, error_d{0};
+  double prev_error_p{0};
+
+  // derivative low-pass (derivative-on-measurement style)
+  double d_filter_tau{0.0};
+  double d_filtered{0.0};
+  bool d_initialized{false};
 };
 
 
