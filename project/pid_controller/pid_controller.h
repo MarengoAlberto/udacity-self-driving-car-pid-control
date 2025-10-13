@@ -6,23 +6,23 @@ public:
   ~PID();
 
   // Initialize controller gains and output limits
-  void init_controller(double k_p,
-                       double k_i,
-                       double k_d,
-                       double lim_max_output,
-                       double lim_min_output);
+  void Init(double k_p,
+            double k_i,
+            double k_d,
+            double lim_max_output,
+            double lim_min_output);
 
-  // Update internal error terms with the new "cte"-like signal
-  void update_error(double cte);
+  // Set the controller timestep Δt (seconds)
+  double UpdateDeltaTime(double new_delta_time);
+
+  // Update internal PID error terms with the new input (cte-like signal)
+  void UpdateError(double cte);
 
   // Evaluate the PID control output (clamped to limits)
-  double total_error();
+  double TotalError();
 
-  // Update the controller timestep Δt (seconds)
-  double update_delta_time(double new_delta_time);
-
-  // Optional helper to clear integral windup
-  void reset_integral() { error_i = 0.0; }
+  // Optional: clear integral term if needed by caller
+  void ResetIntegral() { error_i = 0.0; }
 
 private:
   // Gains
@@ -30,25 +30,25 @@ private:
   double k_i{0.0};
   double k_d{0.0};
 
-  // Output limits
+  // Output clamp
   double lim_max_output{1.0};
   double lim_min_output{-1.0};
 
-  // Current timestep
+  // State
   double delta_t{0.0};
 
-  // Error terms
+  // PID terms
   double error_p{0.0};
   double error_i{0.0};
   double error_d{0.0};
 
-  // Keep the previous proportional error for derivative
+  // For proper derivative (previous proportional error)
   double prev_error_p{0.0};
 
-  // Anti-windup clamp for the integral term
+  // Anti-windup for integral term
   double lim_max_integral{0.5};
 
-  // Simple low-pass on derivative (seconds). 0 => no filter.
+  // Derivative low-pass filter (seconds). 0 => no filtering.
   double d_filter_tau{0.15};
   double d_filtered{0.0};
   bool   d_initialized{false};
