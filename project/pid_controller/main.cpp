@@ -345,241 +345,214 @@ void path_planner(
 int main() {
   std::cout << "Starting server" << "\n";
   uWS::Hub h;
-  double new_delta_time;
+
+  // -------- high-resolution timer --------
+  using clock_t = std::chrono::steady_clock;
+  auto prev_tp = clock_t::now();
+  double new_delta_time = 0.0;
+
   int i = 0;
-  // Read in steering data for the PID controller
-  fstream file_steer;
-  file_steer.open(
-      "steer_pid_data.txt", 
-      std::ofstream::out | std::ofstream::trunc
-  );
-  file_steer.close();
-  // Read in throttle data for the PID controller
-  fstream file_throttle;
-  file_throttle.open(
-      "throttle_pid_data.txt", 
-      std::ofstream::out | std::ofstream::trunc
-  );
-  file_throttle.close();
-  // Create a new timer instance
-  time_t prev_timer;
-  time_t timer;
-  time(&prev_timer);
-  /*** Initialise the PID controller for the ego-vehicle throttle commands ***/
-  PID pid_throttle = PID();
-  // CANDO: Set appropriate gain values here
-  // CASE 1 : Using the P-controller (proportional-gain only):
-  // pid_throttle.init_controller(1.0, 0.0, 0.0, 1.0, -1.0);
-  // pid_throttle.init_controller(0.5, 0.0, 0.0, 1.0, -1.0);
-  // CASE 2 : Using the PD-controller (proportional-derivative gain only):
-  // pid_throttle.init_controller(1.0, 0.0, 1.0, 1.0, -1.0);
-  // pid_throttle.init_controller(0.5, 0.001, 0.0, 1.0, -1.0);
-  // CASE 3 : Using the PID-controller (proportional-integral-derivative gain):
-  // pid_throttle.init_controller(1.0, 1.0, 1.0, 1.0, -1.0);
-  // pid_throttle.init_controller(0.5, 0.001, 0.1, 1.0, -1.0);
-  // pid_throttle.init_controller(0.21, 0.0009, 0.1, 1.0, -1.0);
-  // Final run (I achieved the best results, i.e., no collisions, with these)
-  pid_throttle.init_controller(0.21, 0.0006, 0.080, 1.0, -1.0);
-  /*** Initialise the PID controller for the ego-vehicle steering commands ***/
-  PID pid_steer = PID();
-  // CANDO: Set appropriate gain values here
-  // CASE 1 : Using the P-controller (proportional-gain only):
-  // pid_steer.init_controller(1.0, 0.0, 0.0, 1.2, -1.2);
-  // pid_steer.init_controller(0.5, 0.0, 0.0, 1.2, -1.2);
-  // CASE 2 : Using the PD-controller (proportional-derivative gain only):
-  // pid_steer.init_controller(1.0, 0.0, 1.0, 1.2, -1.2);
-  // pid_steer.init_controller(0.5, 0.001, 0.0, 1.2, -1.2);
-  // CASE 3 : Using the PID-controller (proportional-integral-derivative gain):
-  // pid_steer.init_controller(1.0, 1.0, 1.0, 1.2, -1.2);
-  // pid_steer.init_controller(0.5, 0.001, 0.1, 1.2, -1.2);
-  // pid_steer.init_controller(0.29, 0.0011, 0.3, 1.2, -1.2);
-  // Final run (I achieved the best results, i.e., no collisions, with these)
-  // NOTE: the min / max steering angle has been reduced to $\pm 0.6 rad$ in
-  // order to clip steering commands to feasible values (approx. 35 degrees)
-  pid_steer.init_controller(0.3, 0.0025, 0.17, 0.60, -0.60);
-  h.onMessage(
-      [
-        &pid_steer, 
-        &pid_throttle, 
-        &new_delta_time, 
-        &timer, 
-        &prev_timer, 
-        &i, 
-        &prev_timer
-      ](
-          uWS::WebSocket<uWS::SERVER> ws, 
-          char *data, 
-          size_t length, 
-          uWS::OpCode opCode
-) {
+
+  // Reset PID logs (optional)
+  {
+    std::ofstream("steer_pid_data.txt", std::ofstream::out | std::ofstream::trunc).close();
+    std::ofstream("throttle_pid_data.txt", std::ofstream::out | std::ofstream::trunc).close();
+  }
+
+  // -------- PID controllers --------
+  PID pid_throttle;
+  // stable baseline for speed control
+  pid_throttle.init_controller(0.20, 0.0006, 0.06, 1.0, -1.0);
+
+  PID pid_steer;
+  // small PID around the Stanley target (we keep it gentle)
+  pid_steer.init_controller(0.15, 0.0015, 0.10, 0.60, -0.60); // clamp to ±0.60 rad
+
+  auto wrap = [](double a) {
+    while (a >  M_PI) a -= 2.0*M_PI;
+    while (a < -M_PI) a += 2.0*M_PI;
+    return a;
+  };
+
+  h.onMessage([&](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     auto s = has_data(data);
-    if (s != "") {
-      auto data = json::parse(s);
-      /*** Saving steering / throttle commands to output files ****/
-      // Create file to save steering values from PID controller
-      fstream file_steer;
-      file_steer.open("steer_pid_data.txt");
-      // Create file to save throttle values from PID controller
-      fstream file_throttle;
-      file_throttle.open("throttle_pid_data.txt");
-      /*** Fetching the trajectory and current waypoint data ***/
-      std::vector<double> x_points = data["traj_x"];
-      std::vector<double> y_points = data["traj_y"];
-      std::vector<double> v_points = data["traj_v"];
-      double waypoint_x = data["waypoint_x"];
-      double waypoint_y = data["waypoint_y"];
-      double waypoint_t = data["waypoint_t"];
-      bool is_junction = data["waypoint_j"];
-      /*** Fetching the ego-vehicle state data ***/
-      double x_position = data["location_x"];
-      double y_position = data["location_y"];
-      double z_position = data["location_z"];
-      double yaw = data["yaw"];
-      double velocity = data["velocity"];
-      /*** Fetching the environment state data ***/
-      double sim_time = data["time"];
-      std::string tl_state = data["tl_state"];
-      if (!have_obst) {
-        std::vector<double> x_obst = data["obst_x"];
-        std::vector<double> y_obst = data["obst_y"];
-        set_obst(x_obst, y_obst, obstacles, have_obst);
-      }
-      State goal;
-      goal.location.x = waypoint_x;
-      goal.location.y = waypoint_y;
-      goal.rotation.yaw = waypoint_t;
-      std::vector<std::vector<double>> spirals_x;
-      std::vector<std::vector<double>> spirals_y;
-      std::vector<std::vector<double>> spirals_v;
-      std::vector<int> best_spirals;
-      path_planner(
-          x_points, 
-          y_points, 
-          v_points, 
-          yaw, 
-          velocity, 
-          goal, 
-          is_junction, 
-          tl_state, 
-          spirals_x, 
-          spirals_y, 
-          spirals_v, 
-          best_spirals
-      );
-      // Save current time and compute the delta-time value
-      time(&timer);
-      new_delta_time = difftime(timer, prev_timer);
-      prev_timer = timer;
-      ////////////////////////////////////////
-      // Steering control
-      ////////////////////////////////////////
-      // Update the delta-time variable w.r.t. the previous steering command
-      pid_steer.update_delta_time(new_delta_time);
-      // Get the index of the closest point in the reference trajectory to the
-      // current vehicle position w.r.t. the PID controller steering command
-      std::size_t idx_closest_point = get_closest_point_idx(
-          x_position,
-          y_position,
-          x_points,
-          y_points
-      );
-      // Compute the steering angle error
-      // i.e., difference in heading between current- and trajectory position 
-      double error_steer = angle_between_points(
-          x_position,
-          y_position,
-          x_points[idx_closest_point],
-          y_points[idx_closest_point]
-      ) - yaw;
-      // Compute the steering control value to apply
-      pid_steer.update_error(error_steer);
-      double steer_output = pid_steer.total_error();
-      // Save the output steering command data to the text file
-      file_steer.seekg(std::ios::beg);
-      for (int j=0; j < i - 1; ++j) {
-        file_steer.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-      }
-      file_steer << i << " " << error_steer;
-      file_steer << " " << steer_output << "\n";
-      ////////////////////////////////////////
-      // Throttle control
-      ////////////////////////////////////////
-      // Update the delta-time variable w.r.t. the previous throttle command
-      pid_throttle.update_delta_time(new_delta_time);
-      // Compute throttle error
-      // i.e., the difference between current- and trajectory velocity
-      double error_throttle = v_points[idx_closest_point] - velocity;
-      // Compute the throttle and brake control values to apply
-      double throttle_output;
-      double brake_output;
-      pid_throttle.update_error(error_throttle);
-      // Get the response of the PID controller
-      double throttle_response = pid_throttle.total_error();
-      if (throttle_response > 0.0) {
-        // Set positive response values as actual throttle output command 
-        throttle_output = throttle_response;
-        brake_output = 0;
-      } 
-      else {
-        // Set negative response values to brake output command
-        throttle_output = 0;
-        brake_output = -throttle_response;
-      }
-      // Save the output throttle command data to the text file
-      file_throttle.seekg(std::ios::beg);
-      for(int j=0; j < i - 1; ++j) {
-          file_throttle.ignore(std::numeric_limits<std::streamsize>::max(),'\n');
-      }
-      file_throttle << i << " " << error_throttle;
-      file_throttle << " " << brake_output;
-      file_throttle << " " << throttle_output << "\n";
-      // Execute the control commands with a new message
-      json msgJson;
-      msgJson["brake"] = brake_output;
-      msgJson["throttle"] = throttle_output;
-      msgJson["steer"] = steer_output;
-      msgJson["trajectory_x"] = x_points;
-      msgJson["trajectory_y"] = y_points;
-      msgJson["trajectory_v"] = v_points;
-      msgJson["spirals_x"] = spirals_x;
-      msgJson["spirals_y"] = spirals_y;
-      msgJson["spirals_v"] = spirals_v;
-      msgJson["spiral_idx"] = best_spirals;
-      msgJson["active_maneuver"] = behavior_planner.get_active_maneuver();
-      // Set the minimum point threshold before performing update
-      // NOTE: For a high update rate use value `19`,
-      //       For a slow update rate use value `4`
-      msgJson["update_point_thresh"] = 16;
-      auto msg = msgJson.dump();
-      i += 1;
-      file_steer.close();
-      file_throttle.close();
-      ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+    if (s == "") return;
+
+    auto msg_in = json::parse(s);
+
+    // ---- (optional) open logs ----
+    std::fstream file_steer("steer_pid_data.txt");
+    std::fstream file_throttle("throttle_pid_data.txt");
+
+    // ---- trajectory & waypoint data ----
+    std::vector<double> x_points = msg_in["traj_x"];
+    std::vector<double> y_points = msg_in["traj_y"];
+    std::vector<double> v_points = msg_in["traj_v"];
+    double waypoint_x = msg_in["waypoint_x"];
+    double waypoint_y = msg_in["waypoint_y"];
+    double waypoint_t = msg_in["waypoint_t"];
+    bool is_junction   = msg_in["waypoint_j"];
+
+    // ---- ego state ----
+    double x_position = msg_in["location_x"];
+    double y_position = msg_in["location_y"];
+    double yaw        = msg_in["yaw"];
+    double velocity   = msg_in["velocity"];
+
+    // ---- env ----
+    double sim_time     = msg_in["time"];
+    std::string tl_state = msg_in["tl_state"];
+
+    // ---- refresh obstacles every tick (no stale positions) ----
+    obstacles.clear();
+    {
+      std::vector<double> x_obst = msg_in["obst_x"];
+      std::vector<double> y_obst = msg_in["obst_y"];
+      set_obst(x_obst, y_obst, obstacles, have_obst /*will set true*/);
     }
+
+    // ---- plan path ----
+    State goal;
+    goal.location.x  = waypoint_x;
+    goal.location.y  = waypoint_y;
+    goal.rotation.yaw = waypoint_t;
+
+    std::vector<std::vector<double>> spirals_x, spirals_y, spirals_v;
+    std::vector<int> best_spirals;
+
+    // Use the last point of current path as the starting ego state (as in your code)
+    path_planner(x_points, y_points, v_points, yaw, velocity, goal,
+                 is_junction, tl_state, spirals_x, spirals_y, spirals_v, best_spirals);
+
+    // ---- high-res delta-time ----
+    auto now = clock_t::now();
+    new_delta_time = std::chrono::duration<double>(now - prev_tp).count();
+    prev_tp = now;
+
+    // =================================================================
+    //                          STEERING CONTROL
+    // =================================================================
+    pid_steer.update_delta_time(new_delta_time);
+
+    // closest path point index
+    std::size_t idx_closest_point = get_closest_point_idx(
+        x_position, y_position, x_points, y_points);
+
+    // forward segment for signed CTE
+    std::size_t idx0 = idx_closest_point;
+    std::size_t idx1 = std::min(idx0 + 1, x_points.size() - 1);
+
+    double dx = x_points[idx1] - x_points[idx0];
+    double dy = y_points[idx1] - y_points[idx0];
+    double seg_len = std::hypot(dx, dy) + 1e-9;
+
+    // left normal of path segment
+    double nx = -dy / seg_len;
+    double ny =  dx / seg_len;
+
+    // vector from segment start to vehicle
+    double ex = x_position - x_points[idx0];
+    double ey = y_position - y_points[idx0];
+
+    // signed cross-track error: >0 means vehicle is LEFT of path
+    double cte = ex * nx + ey * ny;
+
+    // heading error to a lookahead point (helps with curvature)
+    std::size_t lookahead = std::min(idx0 + 6, x_points.size() - 1); // 3–8 works well
+    double desired_yaw = atan2(y_points[lookahead] - y_position,
+                               x_points[lookahead] - x_position);
+    double e_psi = wrap(desired_yaw - yaw);
+
+    // Stanley target (no units problem; add small speed in denom)
+    const double Kh = 0.8;   // heading weight
+    const double Kcte = 1.2; // lateral weight
+    double stanley_target = Kh * e_psi + std::atan2(Kcte * cte, velocity + 0.1);
+
+    // Optionally smooth with small PID around the target
+    pid_steer.update_error(stanley_target);
+    double steer_output = pid_steer.total_error();
+    // hard clamp for actuator range
+    steer_output = std::max(-0.60, std::min(0.60, steer_output));
+
+    // log
+    if (file_steer.good()) {
+      file_steer.seekg(std::ios::beg);
+      for (int j = 0; j < i - 1; ++j)
+        file_steer.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+      file_steer << i << " " << stanley_target << " " << steer_output << "\n";
+    }
+
+    // =================================================================
+    //                         THROTTLE / BRAKE
+    // =================================================================
+    pid_throttle.update_delta_time(new_delta_time);
+
+    // velocity tracking to the trajectory point near us
+    double error_throttle = v_points[idx_closest_point] - velocity;
+
+    pid_throttle.update_error(error_throttle);
+    double throttle_response = pid_throttle.total_error();
+
+    double throttle_output = 0.0;
+    double brake_output = 0.0;
+    if (throttle_response > 0.0) {
+      throttle_output = throttle_response; // [0,1] after internal clamp
+      brake_output = 0.0;
+    } else {
+      throttle_output = 0.0;
+      brake_output = -throttle_response;   // map negative to brake
+    }
+
+    if (file_throttle.good()) {
+      file_throttle.seekg(std::ios::beg);
+      for (int j = 0; j < i - 1; ++j)
+        file_throttle.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+      file_throttle << i << " " << error_throttle << " " << brake_output << " " << throttle_output << "\n";
+    }
+
+    // =================================================================
+    //                               SEND
+    // =================================================================
+    json msgJson;
+    msgJson["brake"] = brake_output;
+    msgJson["throttle"] = throttle_output;
+    msgJson["steer"] = steer_output;
+
+    msgJson["trajectory_x"] = x_points;
+    msgJson["trajectory_y"] = y_points;
+    msgJson["trajectory_v"] = v_points;
+    msgJson["spirals_x"] = spirals_x;
+    msgJson["spirals_y"] = spirals_y;
+    msgJson["spirals_v"] = spirals_v;
+    msgJson["spiral_idx"] = best_spirals;
+    msgJson["active_maneuver"] = behavior_planner.get_active_maneuver();
+
+    // update cadence
+    msgJson["update_point_thresh"] = 16;
+
+    auto msg = msgJson.dump();
+    i += 1;
+
+    file_steer.close();
+    file_throttle.close();
+
+    ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
   });
-  h.onConnection(
-      [](
-          uWS::WebSocket<uWS::SERVER> ws, 
-          uWS::HttpRequest req
-  ) {
+
+  h.onConnection([](uWS::WebSocket<uWS::SERVER> ws, uWS::HttpRequest req) {
     std::cout << "Connected!!!" << "\n";
   });
-  h.onDisconnection(
-      [&h](
-          uWS::WebSocket<uWS::SERVER> ws, 
-          int code, 
-          char *message, 
-          size_t length
-  ) {
+
+  h.onDisconnection([&h](uWS::WebSocket<uWS::SERVER> ws, int code, char *message, size_t length) {
     ws.close();
     std::cout << "Disconnected" << "\n";
   });
+
   int port = 4567;
   if (h.listen("0.0.0.0", port)) {
     std::cout << "Listening to port " << port << "\n";
     h.run();
-  }
-  else {
+  } else {
     std::cerr << "Failed to listen to port" << "\n";
     return -1;
   }
