@@ -1,40 +1,69 @@
-#pragma once
+/**********************************************
+ * Self-Driving Car Nano-degree - Udacity
+ *  Created on: December 11, 2020
+ *      Author: Mathilde Badoual
+ **********************************************/
+
+#ifndef PID_CONTROLLER_H
+#define PID_CONTROLLER_H
 
 class PID {
 public:
-  PID();
-  ~PID();
 
-  // Same API names you use in main.cpp
-  void Init(double k_p, double k_i, double k_d,
-            double lim_max_output, double lim_min_output);
+   /**
+   * TODO: Create the PID class
+   **/
 
-  double UpdateDeltaTime(double new_delta_time);
-  void   UpdateError(double cte);
-  double TotalError();
+    /*
+    * Errors
+    */
+    double cte0;
+    /*
+    * Coefficients
+    */
+    double Kp;
+    double Ki;
+    double Kd;
+    /*
+    * Output limits
+    */
+    double action;
+    double output_lim_max;
+    double output_lim_min;
+    /*
+    * Delta time
+    */
+    double delta_time, I;
+    /*
+    * Constructor
+    */
+    PID();
 
-  // Optional helper
-  void   ResetIntegral() { error_i = 0.0; }
+    /*
+    * Destructor.
+    */
+    virtual ~PID();
 
-private:
-  // Gains
-  double k_p{0.0}, k_i{0.0}, k_d{0.0};
+    /*
+    * Initialize PID.
+    */
+    void Init(double Kp, double Ki, double Kd, double output_lim_max, double output_lim_min);
 
-  // Output clamp
-  double lim_max_output{1.0}, lim_min_output{-1.0};
+    /*
+    * Update the PID error variables given cross track error.
+    */
+//    void UpdateError(double cte);
+    void UpdateError(double cte);
 
-  // Timing
-  double delta_t{0.0};
+    /*
+    * Calculate the total PID error.
+    */
+    double TotalError();
 
-  // PID states
-  double error_p{0.0}, error_i{0.0}, error_d{0.0};
-  double prev_error_p{0.0};
-
-  // Anti-windup for I term
-  double lim_max_integral{0.5};
-
-  // Small derivative low-pass (seconds). 0 => no filter
-  double d_filter_tau{0.15};
-  double d_filtered{0.0};
-  bool   d_initialized{false};
+    /*
+    * Update the delta time.
+    */
+    double UpdateDeltaTime(double new_delta_time);
 };
+
+#endif //PID_CONTROLLER_H
