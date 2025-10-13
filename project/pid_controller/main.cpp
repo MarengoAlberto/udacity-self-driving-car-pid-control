@@ -1,15 +1,8 @@
 /* ------------------------------------------------------------------------------
  * Project "5.1: Control and Trajectory Tracking for Autonomous Vehicles"
- * Authors     : Munir Jojo-Verge, Aaron Brown, Mathilda Badoual.
- *
- * Modified by : Jonathan L. Moran (jonathan.moran107@gmail.com)
- *
- * Purpose of this file: Executes the motion / trajectory planner from P4.1 
- *                       and the PID controller / trajectory tracker from P5.1.
+ * This file runs the behavior/motion planner and the controllers.
  * ----------------------------------------------------------------------------
  */
-
-
 #include "json.hpp"
 #include "behavior_planner_FSM.h"
 #include "motion_planner.h"
@@ -17,6 +10,7 @@
 #include "utils.h"
 #include "pid_controller.h"
 #include "Eigen/QR"
+
 #include <carla/client/ActorBlueprint.h>
 #include <carla/client/BlueprintLibrary.h>
 #include <carla/client/Client.h>
@@ -28,14 +22,14 @@
 #include <carla/image/ImageIO.h>
 #include <carla/image/ImageView.h>
 #include <carla/sensor/data/Image.h>
+
 #include <uWS/uWS.h>
-#include <time.h>
-#include <math.h>
-#include <array>
-#include <cfloat>
+
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -43,494 +37,308 @@
 #include <thread>
 #include <tuple>
 #include <vector>
-#include <fstream>
-#include <typeinfo>
-#include <limits>
 
 using json = nlohmann::json;
 #define _USE_MATH_DEFINES
 
-/*** Setting the global variables **/
-// Declares and initialises the ego-vehicle behaviour planner module
+/*** Globals provided by the starter ***/
 BehaviorPlannerFSM behavior_planner(
-    P_LOOKAHEAD_TIME, 
-    P_LOOKAHEAD_MIN, 
-    P_LOOKAHEAD_MAX, 
-    P_SPEED_LIMIT,
-    P_STOP_THRESHOLD_SPEED, 
-    P_REQ_STOPPED_TIME, 
-    P_REACTION_TIME,
-    P_MAX_ACCEL, 
-    P_STOP_LINE_BUFFER
-);
-// Declares and initialises the ego-vehicle motion planner module
-MotionPlanner motion_planner(
-    P_NUM_PATHS, 
-    P_GOAL_OFFSET, 
-    P_ERR_TOLERANCE
-);
-// Sets the global obstacles flag to `false` (no obstacles at current position)
+    P_LOOKAHEAD_TIME, P_LOOKAHEAD_MIN, P_LOOKAHEAD_MAX, P_SPEED_LIMIT,
+    P_STOP_THRESHOLD_SPEED, P_REQ_STOPPED_TIME, P_REACTION_TIME,
+    P_MAX_ACCEL, P_STOP_LINE_BUFFER);
+
+MotionPlanner motion_planner(P_NUM_PATHS, P_GOAL_OFFSET, P_ERR_TOLERANCE);
+
 bool have_obst = false;
-// Initialise the vector of obstacle states
 std::vector<State> obstacles;
 
-
-/* Helper function to check if the given string contains data.
- *
- * @param    s    String to examine for relevant data.
- * @returns  Substring with data of interest, empty string ("") otherwise. 
- */
-std::string has_data(
-    std::string s
-) {
+/*** Helpers from the starter (unchanged) ***/
+std::string has_data(std::string s) {
   auto found_null = s.find("null");
   auto b1 = s.find_first_of("{");
   auto b2 = s.find_first_of("}");
-  if (found_null != std::string::npos) {
-    return "";
-  }
-  else if (
-      b1 != std::string::npos 
-      && b2 != std::string::npos
-  ) {
+  if (found_null != std::string::npos) return "";
+  else if (b1 != std::string::npos && b2 != std::string::npos)
     return s.substr(b1, b2 - b1 + 1);
-  }
   return "";
 }
 
-
-/* Creates the set of obstacles from the given coordinate vectors.
- *
- * A new `State` instance is created and initialised for every point in the
- * given coordinate vectors. Each new obstacle `State` is appended to the
- * `obstacles` vector and the global `obst_flag` is then set to `true`.
- *
- * @param  x_points   Coordinates of the obstacles along the x-axis.
- * @param  y_points   Coordinates of the obstacles along the y-axis.
- * @param  obstacles  Vector to update with obstacle `State` instances.
- * @param  obst_flag  Gloabl flag to update, is `true` when obstacles present.
- */
-void set_obst(
-    std::vector<double> x_points, 
-    std::vector<double> y_points, 
-    std::vector<State>& obstacles, 
-    bool& obst_flag
-) {
-	for (int i = 0; i < x_points.size(); i++) {
-		State obstacle;
-		obstacle.location.x = x_points[i];
-		obstacle.location.y = y_points[i];
-		obstacles.push_back(obstacle);
-	}
-	obst_flag = true;
+void set_obst(std::vector<double> x_points,
+              std::vector<double> y_points,
+              std::vector<State>& obstacles,
+              bool& obst_flag) {
+  for (size_t i = 0; i < x_points.size(); ++i) {
+    State obstacle;
+    obstacle.location.x = x_points[i];
+    obstacle.location.y = y_points[i];
+    obstacles.push_back(obstacle);
+  }
+  obst_flag = true;
 }
 
-
-/* Returns the index of the point in vector closest to the given coordinates. 
- *
- * @param    point_x      Coordinate of the reference point along the x-axis. 
- * @param    point_y      Coordinate of the reference point along the y-axis.
- * @param    points_x     Set of x-coordinates to compute the distance to.
- * @param    points_y     Set of y-coordinates to compute the distance to.
- * @returns  closest_idx  Index of point in vector closest to the coordinates. 
- */
-std::size_t get_closest_point_idx(
-    double point_x,
-    double point_y,
-    std::vector<double> points_x,
-    std::vector<double> points_y
-) {
-  // Index of closest found point 
+std::size_t get_closest_point_idx(double point_x, double point_y,
+                                  std::vector<double> points_x,
+                                  std::vector<double> points_y) {
   std::size_t closest_idx = 0;
-  // Distance to point
   double dist_min = std::numeric_limits<double>::infinity();
-  // Find closest point in vector
   for (std::size_t i = 0; i < points_x.size(); ++i) {
-    double dist = std::pow(
-        (std::pow((point_x - points_x[i]), 2)
-         + std::pow((point_y - points_y[i]), 2)
-        ),
-        0.5
-    );
-    if (dist < dist_min) {
-      dist_min = dist;
-      closest_idx = i;
-    }
+    double dx = point_x - points_x[i];
+    double dy = point_y - points_y[i];
+    double dist = std::sqrt(dx*dx + dy*dy);
+    if (dist < dist_min) { dist_min = dist; closest_idx = i; }
   }
   return closest_idx;
 }
 
-
-/* Helper function to compute the angle between two points.
- *
- * @param  x1   Coordinate of the first 2D point along the x-axis.
- * @param  y1   Coordinate of the first 2D point along the y-axis.
- * @param  x2   Coordinate of the second 2D point along the x-axis.
- * @param  y2   Coordinate of the second 2D point along the y-axis.
- * @returns     Angle between the two points.
- */
-double angle_between_points(
-    double x1, 
-    double y1, 
-    double x2, 
-    double y2
-) {
-  return atan2(y2 - y1, x2 - x1);
+double angle_between_points(double x1, double y1, double x2, double y2) {
+  return std::atan2(y2 - y1, x2 - x1);
 }
 
+template <typename T> int sgn(T val) { return (T(0) < val) - (val < T(0)); }
 
-template <typename T> int sgn(
-    T val
-) {
-  return (T(0) < val) - (val < T(0));
-}
-
-
-/* Updates the ego-vehicle trajectory.
- *
- * The trajectory is updated by interfacing with the behaviour and
- * motion planning modules in the `behavior_planner_FSM` and `motion_planner`
- * files, respectively. A state transition is computed in the behaviour module
- * for the given ego-vehicle state (position / orientation angle), which is
- * then used to compute the goal-offset trajectories as polynomial spirals in
- * the motion planner and velocity profile generator modules.
- * 
- * The best trajectory from the generated goal-offset trajectories is selected
- * and its corresponding waypoints are used to update the ego-vehicle.
- *
- * @param  x_points       Ego-vehicle trajectory coordinates along the x-axis.
- * @param  y_points       Ego-vehicle trajectory coordinates along the y-axis.
- * @param  v_points       Ego-vehicle trajectory velocity (m/s) values.
- * @param  yaw            Ego-vehicle trajectory yaw angle / heading.
- * @param  velocity       Current velocity (m/s) of the ego-vehicle.
- * @param  goal           Current goal-state of the ego-vehicle.
- * @param  is_junction    Junction state flag, `true` if at junction.
- * @param  tl_state       Traffic light state variable.
- * @param  spirals_x      Polynomial spiral coordinates along the x-axis.
- * @param  spirals_y      Polynomial spiral coordinates along the y-axis.
- * @param  spirals_v      Polynomial spiral velocity (m/s) values.
- * @param  best_spirals   Vector of indices of the best polynomial spirals.
- */
-void path_planner(
-    std::vector<double>& x_points, 
-    std::vector<double>& y_points, 
-    std::vector<double>& v_points, 
-    double yaw, 
-    double velocity, 
-    State goal, 
-    bool is_junction, 
-    std::string tl_state, 
-    std::vector<std::vector<double>>& spirals_x, 
-    std::vector<std::vector<double>>& spirals_y, 
-    std::vector<std::vector<double>>& spirals_v, 
-    std::vector<int>& best_spirals
-) {
+/*** Path planner wrapper (starter’s logic, unchanged) ***/
+void path_planner(std::vector<double>& x_points,
+                  std::vector<double>& y_points,
+                  std::vector<double>& v_points,
+                  double yaw,
+                  double velocity,
+                  State goal,
+                  bool is_junction,
+                  std::string tl_state,
+                  std::vector<std::vector<double>>& spirals_x,
+                  std::vector<std::vector<double>>& spirals_y,
+                  std::vector<std::vector<double>>& spirals_v,
+                  std::vector<int>& best_spirals) {
   State ego_state;
-  ego_state.location.x = x_points[x_points.size() - 1];
-  ego_state.location.y = y_points[y_points.size() - 1];
+  ego_state.location.x = x_points.back();
+  ego_state.location.y = y_points.back();
   ego_state.velocity.x = velocity;
   if (x_points.size() > 1) {
-  	ego_state.rotation.yaw = angle_between_points(
-        x_points[x_points.size() - 2], 
-        y_points[y_points.size() - 2], 
-        x_points[x_points.size() - 1], 
-        y_points[y_points.size() - 1]
-    );
-  	ego_state.velocity.x = v_points[v_points.size() - 1];
-  	if (velocity < 0.01) {
-  		ego_state.rotation.yaw = yaw;
-    }
+    ego_state.rotation.yaw = angle_between_points(
+        x_points[x_points.size()-2], y_points[y_points.size()-2],
+        x_points[x_points.size()-1], y_points[y_points.size()-1]);
+    ego_state.velocity.x = v_points.back();
+    if (velocity < 0.01) ego_state.rotation.yaw = yaw;
   }
+
   Maneuver behavior = behavior_planner.get_active_maneuver();
-  goal = behavior_planner.state_transition(
-      ego_state, 
-      goal, 
-      is_junction, 
-      tl_state
-  );
+  goal = behavior_planner.state_transition(ego_state, goal, is_junction, tl_state);
+
   if (behavior == STOPPED) {
-  	int max_points = 20;
-  	double point_x = x_points[x_points.size() - 1];
-  	double point_y = y_points[x_points.size() - 1];
-  	while (x_points.size() < max_points) {
-  	  x_points.push_back(point_x);
-  	  y_points.push_back(point_y);
-  	  v_points.push_back(0);
-  	}
-  	return;
-  }
-  auto goal_set = motion_planner.generate_offset_goals(
-      goal
-  );
-  auto spirals = motion_planner.generate_spirals(
-      ego_state, 
-      goal_set
-  );
-  auto desired_speed = utils::magnitude(
-      goal.velocity
-  );
-  State lead_car_state;  // = to the vehicle ahead...
-  if (spirals.size() == 0) {
-  	std::cout << "Error: No spirals generated " << "\n";
-  	return;
-  }
-  for (int i = 0; i < spirals.size(); i++) {
-    auto trajectory = (
-        motion_planner._velocity_profile_generator.generate_trajectory(
-            spirals[i], 
-            desired_speed, 
-            ego_state,
-            lead_car_state, 
-            behavior
-        )
-    );
-    std::vector<double> spiral_x;
-    std::vector<double> spiral_y;
-    std::vector<double> spiral_v;
-    for (int j = 0; j < trajectory.size(); j++) {
-      double point_x = trajectory[j].path_point.x;
-      double point_y = trajectory[j].path_point.y;
-      double velocity = trajectory[j].v;
-      spiral_x.push_back(point_x);
-      spiral_y.push_back(point_y);
-      spiral_v.push_back(velocity);
+    int max_points = 20;
+    double px = x_points.back(), py = y_points.back();
+    while ((int)x_points.size() < max_points) {
+      x_points.push_back(px); y_points.push_back(py); v_points.push_back(0.0);
     }
-    spirals_x.push_back(spiral_x);
-    spirals_y.push_back(spiral_y);
-    spirals_v.push_back(spiral_v);
+    return;
   }
-  best_spirals = motion_planner.get_best_spiral_idx(
-      spirals, 
-      obstacles, 
-      goal
-  );
-  int best_spiral_idx = -1;
-  if (best_spirals.size() > 0) {
-  	best_spiral_idx = best_spirals[best_spirals.size() - 1];
+
+  auto goal_set = motion_planner.generate_offset_goals(goal);
+  auto spirals = motion_planner.generate_spirals(ego_state, goal_set);
+
+  if (spirals.empty()) {
+    std::cout << "Error: No spirals generated\n"; return;
   }
-  int index = 0;
-  int max_points = 20;
-  int add_points = spirals_x[best_spiral_idx].size();
-  while (
-      x_points.size() < max_points 
-      && index < add_points
-  ) {
-    double point_x = spirals_x[best_spiral_idx][index];
-    double point_y = spirals_y[best_spiral_idx][index];
-    double velocity = spirals_v[best_spiral_idx][index];
-    index++;
-    x_points.push_back(point_x);
-    y_points.push_back(point_y);
-    v_points.push_back(velocity);
+
+  auto desired_speed = utils::magnitude(goal.velocity);
+  State lead_car_state;
+
+  for (auto& sp : spirals) {
+    auto traj = motion_planner._velocity_profile_generator
+                  .generate_trajectory(sp, desired_speed, ego_state, lead_car_state, behavior);
+
+    std::vector<double> sx, sy, sv;
+    sx.reserve(traj.size()); sy.reserve(traj.size()); sv.reserve(traj.size());
+    for (auto& t : traj) {
+      sx.push_back(t.path_point.x);
+      sy.push_back(t.path_point.y);
+      sv.push_back(t.v);
+    }
+    spirals_x.push_back(std::move(sx));
+    spirals_y.push_back(std::move(sy));
+    spirals_v.push_back(std::move(sv));
+  }
+
+  best_spirals = motion_planner.get_best_spiral_idx(spirals, obstacles, goal);
+
+  int best_idx = -1;
+  if (!best_spirals.empty()) best_idx = best_spirals.back();
+
+  int index = 0, max_points = 20;
+  int add_points = spirals_x[best_idx].size();
+  while ((int)x_points.size() < max_points && index < add_points) {
+    x_points.push_back(spirals_x[best_idx][index]);
+    y_points.push_back(spirals_y[best_idx][index]);
+    v_points.push_back(spirals_v[best_idx][index]);
+    ++index;
   }
 }
 
-
-/* Runs the motion / trajectory planning (P4.1) and the
- * control / trajectory tracking (P5.1) modules.
- * 
- * The ego-vehicle state is updated relative to the response of the
- * PID controller, which is implemented for both steering and throttle
- * commands. The error between the current- and intended trajectory is
- * computed on each time-step and used to update the PID controller.
- * 
- * The output steering / throttle comamnds are saved to the respective
- * text files, which are later used to plot the performance of the controller
- * using the `plot_pid.py` script.
- *
- * Lastly, the actuation commands are issued to the ego-vehicle via the
- * `uWebSockets` library. These commands and any obstacles are rendered in
- * the CARLA Simulator environment in a separate process.
- */
+/*** MAIN ***/
 int main() {
-  std::cout << "Starting server" << "\n";
+  std::cout << "Starting server\n";
   uWS::Hub h;
 
-  // -------- high-resolution timer --------
+  // High-resolution clock for Δt
   using clock_t = std::chrono::steady_clock;
   auto prev_tp = clock_t::now();
   double new_delta_time = 0.0;
 
   int i = 0;
 
-  // Reset PID logs (optional)
-  {
-    std::ofstream("steer_pid_data.txt", std::ofstream::out | std::ofstream::trunc).close();
-    std::ofstream("throttle_pid_data.txt", std::ofstream::out | std::ofstream::trunc).close();
-  }
+  // Reset logs (optional)
+  { std::ofstream("steer_pid_data.txt", std::ofstream::trunc).close();
+    std::ofstream("throttle_pid_data.txt", std::ofstream::trunc).close(); }
 
-  // -------- PID controllers --------
+  // Controllers
   PID pid_throttle;
-  // stable baseline for speed control
   pid_throttle.init_controller(0.20, 0.0006, 0.06, 1.0, -1.0);
 
   PID pid_steer;
-  // small PID around the Stanley target (we keep it gentle)
-  pid_steer.init_controller(0.15, 0.0015, 0.10, 0.60, -0.60); // clamp to ±0.60 rad
+  // gentle PID around the steering target, clipped to ±0.60 rad
+  pid_steer.init_controller(0.15, 0.0015, 0.10, 0.60, -0.60);
 
-  auto wrap = [](double a) {
+  auto wrap = [](double a){
     while (a >  M_PI) a -= 2.0*M_PI;
     while (a < -M_PI) a += 2.0*M_PI;
     return a;
   };
 
   h.onMessage([&](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
-    auto s = has_data(data);
-    if (s == "") return;
+    auto s = has_data(std::string(data, length));
+    if (s.empty()) return;
 
-    auto msg_in = json::parse(s);
+    json in = json::parse(s);
 
-    // ---- (optional) open logs ----
+    // (Re)open logs
     std::fstream file_steer("steer_pid_data.txt");
     std::fstream file_throttle("throttle_pid_data.txt");
 
-    // ---- trajectory & waypoint data ----
-    std::vector<double> x_points = msg_in["traj_x"];
-    std::vector<double> y_points = msg_in["traj_y"];
-    std::vector<double> v_points = msg_in["traj_v"];
-    double waypoint_x = msg_in["waypoint_x"];
-    double waypoint_y = msg_in["waypoint_y"];
-    double waypoint_t = msg_in["waypoint_t"];
-    bool is_junction   = msg_in["waypoint_j"];
+    // Trajectory and waypoint
+    std::vector<double> x_points = in["traj_x"];
+    std::vector<double> y_points = in["traj_y"];
+    std::vector<double> v_points = in["traj_v"];
+    double waypoint_x = in["waypoint_x"];
+    double waypoint_y = in["waypoint_y"];
+    double waypoint_t = in["waypoint_t"];
+    bool   is_junction = in["waypoint_j"];
 
-    // ---- ego state ----
-    double x_position = msg_in["location_x"];
-    double y_position = msg_in["location_y"];
-    double yaw        = msg_in["yaw"];
-    double velocity   = msg_in["velocity"];
+    // Ego
+    double x_position = in["location_x"];
+    double y_position = in["location_y"];
+    double yaw        = in["yaw"];
+    double velocity   = in["velocity"];
 
-    // ---- env ----
-    double sim_time     = msg_in["time"];
-    std::string tl_state = msg_in["tl_state"];
+    // Env
+    std::string tl_state = in["tl_state"];
 
-    // ---- refresh obstacles every tick (no stale positions) ----
+    // Refresh obstacles every tick (avoid stale obstacle bias)
     obstacles.clear();
+    have_obst = false;
     {
-      std::vector<double> x_obst = msg_in["obst_x"];
-      std::vector<double> y_obst = msg_in["obst_y"];
-      set_obst(x_obst, y_obst, obstacles, have_obst /*will set true*/);
+      std::vector<double> x_obst = in["obst_x"];
+      std::vector<double> y_obst = in["obst_y"];
+      set_obst(x_obst, y_obst, obstacles, have_obst);
     }
 
-    // ---- plan path ----
+    // Plan
     State goal;
-    goal.location.x  = waypoint_x;
-    goal.location.y  = waypoint_y;
+    goal.location.x = waypoint_x;
+    goal.location.y = waypoint_y;
     goal.rotation.yaw = waypoint_t;
 
     std::vector<std::vector<double>> spirals_x, spirals_y, spirals_v;
     std::vector<int> best_spirals;
 
-    // Use the last point of current path as the starting ego state (as in your code)
-    path_planner(x_points, y_points, v_points, yaw, velocity, goal,
-                 is_junction, tl_state, spirals_x, spirals_y, spirals_v, best_spirals);
+    path_planner(x_points, y_points, v_points, yaw, velocity,
+                 goal, is_junction, tl_state,
+                 spirals_x, spirals_y, spirals_v, best_spirals);
 
-    // ---- high-res delta-time ----
+    // Δt
     auto now = clock_t::now();
     new_delta_time = std::chrono::duration<double>(now - prev_tp).count();
     prev_tp = now;
 
-    // =================================================================
-    //                          STEERING CONTROL
-    // =================================================================
+    // ----------------------- STEERING -----------------------
     pid_steer.update_delta_time(new_delta_time);
 
-    // closest path point index
-    std::size_t idx_closest_point = get_closest_point_idx(
-        x_position, y_position, x_points, y_points);
+    // Closest path point
+    std::size_t idx = get_closest_point_idx(x_position, y_position, x_points, y_points);
 
-    // forward segment for signed CTE
-    std::size_t idx0 = idx_closest_point;
-    std::size_t idx1 = std::min(idx0 + 1, x_points.size() - 1);
+    // Compute signed cross-track error using the forward segment
+    std::size_t i0 = idx;
+    std::size_t i1 = std::min(i0 + 1, x_points.size() - 1);
+    double sx = x_points[i1] - x_points[i0];
+    double sy = y_points[i1] - y_points[i0];
+    double seg_len = std::hypot(sx, sy) + 1e-9;
 
-    double dx = x_points[idx1] - x_points[idx0];
-    double dy = y_points[idx1] - y_points[idx0];
-    double seg_len = std::hypot(dx, dy) + 1e-9;
+    double vx = x_position - x_points[i0];
+    double vy = y_position - y_points[i0];
 
-    // left normal of path segment
-    double nx = -dy / seg_len;
-    double ny =  dx / seg_len;
+    // Signed lateral error: positive if the car is LEFT of the segment direction
+    double cte = (vx*sy - vy*sx) / seg_len;
 
-    // vector from segment start to vehicle
-    double ex = x_position - x_points[idx0];
-    double ey = y_position - y_points[idx0];
+    // Heading error to a lookahead point (helps with curvature)
+    std::size_t look = std::min(i0 + 6, x_points.size() - 1);
+    double desired_yaw = std::atan2(y_points[look] - y_position,
+                                    x_points[look] - x_position);
+    double epsi = wrap(desired_yaw - yaw);
 
-    // signed cross-track error: >0 means vehicle is LEFT of path
-    double cte = ex * nx + ey * ny;
-
-    // heading error to a lookahead point (helps with curvature)
-    std::size_t lookahead = std::min(idx0 + 6, x_points.size() - 1); // 3–8 works well
-    double desired_yaw = atan2(y_points[lookahead] - y_position,
-                               x_points[lookahead] - x_position);
-    double e_psi = wrap(desired_yaw - yaw);
-
-    // Stanley target (no units problem; add small speed in denom)
+    // Stanley-style target steering (heading + lateral)
     const double Kh = 0.8;   // heading weight
     const double Kcte = 1.2; // lateral weight
-    double stanley_target = Kh * e_psi + std::atan2(Kcte * cte, velocity + 0.1);
+    double steer_target = Kh * epsi + std::atan2(Kcte * cte, velocity + 0.1);
 
-    // Optionally smooth with small PID around the target
-    pid_steer.update_error(stanley_target);
+    // Smooth target with small PID and clamp
+    pid_steer.update_error(steer_target);
     double steer_output = pid_steer.total_error();
-    // hard clamp for actuator range
-    steer_output = std::max(-0.60, std::min(0.60, steer_output));
+    if (steer_output >  0.60) steer_output =  0.60;
+    if (steer_output < -0.60) steer_output = -0.60;
 
-    // log
+    // Log steering
     if (file_steer.good()) {
       file_steer.seekg(std::ios::beg);
-      for (int j = 0; j < i - 1; ++j)
+      for (int j=0; j < i-1; ++j)
         file_steer.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-      file_steer << i << " " << stanley_target << " " << steer_output << "\n";
+      file_steer << i << " " << steer_target << " " << steer_output << "\n";
     }
 
-    // =================================================================
-    //                         THROTTLE / BRAKE
-    // =================================================================
+    // --------------------- THROTTLE / BRAKE ---------------------
     pid_throttle.update_delta_time(new_delta_time);
 
-    // velocity tracking to the trajectory point near us
-    double error_throttle = v_points[idx_closest_point] - velocity;
-
+    double error_throttle = v_points[idx] - velocity;
     pid_throttle.update_error(error_throttle);
-    double throttle_response = pid_throttle.total_error();
+    double t_resp = pid_throttle.total_error();
 
-    double throttle_output = 0.0;
-    double brake_output = 0.0;
-    if (throttle_response > 0.0) {
-      throttle_output = throttle_response; // [0,1] after internal clamp
-      brake_output = 0.0;
-    } else {
-      throttle_output = 0.0;
-      brake_output = -throttle_response;   // map negative to brake
-    }
+    double throttle_output = (t_resp > 0.0) ? t_resp : 0.0;
+    double brake_output    = (t_resp > 0.0) ? 0.0   : -t_resp;
 
     if (file_throttle.good()) {
       file_throttle.seekg(std::ios::beg);
-      for (int j = 0; j < i - 1; ++j)
+      for (int j=0; j < i-1; ++j)
         file_throttle.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-      file_throttle << i << " " << error_throttle << " " << brake_output << " " << throttle_output << "\n";
+      file_throttle << i << " " << error_throttle << " " << brake_output
+                    << " " << throttle_output << "\n";
     }
 
-    // =================================================================
-    //                               SEND
-    // =================================================================
-    json msgJson;
-    msgJson["brake"] = brake_output;
-    msgJson["throttle"] = throttle_output;
-    msgJson["steer"] = steer_output;
+    // ------------------------- SEND -------------------------
+    json out;
+    out["brake"] = brake_output;
+    out["throttle"] = throttle_output;
+    out["steer"] = steer_output;
 
-    msgJson["trajectory_x"] = x_points;
-    msgJson["trajectory_y"] = y_points;
-    msgJson["trajectory_v"] = v_points;
-    msgJson["spirals_x"] = spirals_x;
-    msgJson["spirals_y"] = spirals_y;
-    msgJson["spirals_v"] = spirals_v;
-    msgJson["spiral_idx"] = best_spirals;
-    msgJson["active_maneuver"] = behavior_planner.get_active_maneuver();
+    out["trajectory_x"] = x_points;
+    out["trajectory_y"] = y_points;
+    out["trajectory_v"] = v_points;
+    out["spirals_x"] = spirals_x;
+    out["spirals_y"] = spirals_y;
+    out["spirals_v"] = spirals_v;
+    out["spiral_idx"] = best_spirals;
+    out["active_maneuver"] = behavior_planner.get_active_maneuver();
 
-    // update cadence
-    msgJson["update_point_thresh"] = 16;
+    out["update_point_thresh"] = 16;
 
-    auto msg = msgJson.dump();
+    auto msg = out.dump();
     i += 1;
 
     file_steer.close();
@@ -540,12 +348,12 @@ int main() {
   });
 
   h.onConnection([](uWS::WebSocket<uWS::SERVER> ws, uWS::HttpRequest req) {
-    std::cout << "Connected!!!" << "\n";
+    std::cout << "Connected!!!\n";
   });
 
   h.onDisconnection([&h](uWS::WebSocket<uWS::SERVER> ws, int code, char *message, size_t length) {
     ws.close();
-    std::cout << "Disconnected" << "\n";
+    std::cout << "Disconnected\n";
   });
 
   int port = 4567;
@@ -553,7 +361,7 @@ int main() {
     std::cout << "Listening to port " << port << "\n";
     h.run();
   } else {
-    std::cerr << "Failed to listen to port" << "\n";
+    std::cerr << "Failed to listen to port\n";
     return -1;
   }
 }
