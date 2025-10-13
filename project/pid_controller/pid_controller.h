@@ -1,69 +1,80 @@
-/**********************************************
- * Self-Driving Car Nano-degree - Udacity
- *  Created on: December 11, 2020
- *      Author: Mathilde Badoual
- **********************************************/
+/* ------------------------------------------------------------------------------
+ * Project "5.1: Control and Trajectory Tracking for Autonomous Vehicles"
+ * Authors     : Mathilde Badoual.
+ *
+ * Modified by : Jonathan L. Moran (jonathan.moran107@gmail.com)
+ *
+ * Purpose of this file: Header file for the PID controller.
+ * ----------------------------------------------------------------------------
+ */
 
 #ifndef PID_CONTROLLER_H
 #define PID_CONTROLLER_H
 
+#include <vector>
+#include <iostream>
+#include <math.h>
+
+
+/* The PID controller class.
+ *
+ * Implements the proportional-integral-derivative (PID) controller for use in
+ * vehicle trajectory tracking. The response of the PID controller is used to
+ * execute actuations via steering and throttle commands which track a
+ * reference trajectory. The PID controller is expressed mathematically as:
+ * $$\begin{align}
+ * \alpha &= -\tau_{p} * \mathrm{CTE} 
+ *           - \tau_{d} * \Delta \mathrm{CTE} 
+ *           - \tau_{i} * \int_{0}^{t} \mathrm{CTE},
+ * \end{align}$$
+ * where the integral term $\int_{0}^{t} \mathrm{CTE}$ is given as the sum of
+ * the instantaneous error over time. This gives the accumulated offset that
+ * should have been previously corrected.
+ * 
+ * @var  lim_max_output  Maximum output value (used to threshold controller).
+ * @var  lim_min_output  Minimum output value (used to threshold controller). 
+ * @var  delta_t         Elapsed time (s) (used to compute derivative term).
+ * @var  error_p         Proportional error term.
+ * @var  error_i         Integral error term.
+ * @var  error_d         Derivative error term.
+ * @var  k_p             Proportional gain value (used to compute `error_p`)
+ * @var  k_i             Integral gain value (used to compute `error_i`)
+ * @var  k_d             Derivative gain value (used to compute `error_d`)
+ */
 class PID {
-public:
+ public:
+  double lim_max_output;
+  double lim_min_output;
+  double delta_t;
+  double error_p;
+  double error_i;
+  double error_d;
+  double k_p;
+  double k_i;
+  double k_d;
 
-   /**
-   * TODO: Create the PID class
-   **/
+  PID();
+  virtual ~PID();
 
-    /*
-    * Errors
-    */
-    double cte0;
-    /*
-    * Coefficients
-    */
-    double Kp;
-    double Ki;
-    double Kd;
-    /*
-    * Output limits
-    */
-    double action;
-    double output_lim_max;
-    double output_lim_min;
-    /*
-    * Delta time
-    */
-    double delta_time, I;
-    /*
-    * Constructor
-    */
-    PID();
-
-    /*
-    * Destructor.
-    */
-    virtual ~PID();
-
-    /*
-    * Initialize PID.
-    */
-    void Init(double Kp, double Ki, double Kd, double output_lim_max, double output_lim_min);
-
-    /*
-    * Update the PID error variables given cross track error.
-    */
-//    void UpdateError(double cte);
-    void UpdateError(double cte);
-
-    /*
-    * Calculate the total PID error.
-    */
-    double TotalError();
-
-    /*
-    * Update the delta time.
-    */
-    double UpdateDeltaTime(double new_delta_time);
+  // Initialises the PID controller with the given parameter values
+  void init_controller(
+      double k_p, 
+      double k_i, 
+      double k_d, 
+      double lim_max_output, 
+      double lim_min_output
+  );
+  // Updates the PID controller error terms given the cross-track error
+  void update_error(
+      double cte
+  );
+  // Computes the total error for the PID controller
+  double total_error();
+  // Updates $\Delta t$ to the given value
+  double update_delta_time(
+      double new_delta_time
+  );
 };
 
-#endif //PID_CONTROLLER_H
+
+#endif  //PID_CONTROLLER_H

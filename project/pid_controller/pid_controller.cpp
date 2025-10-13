@@ -1,60 +1,104 @@
-/**********************************************
- * Self-Driving Car Nano-degree - Udacity
- *  Created on: December 11, 2020
- *      Author: Mathilde Badoual
- **********************************************/
+/* ------------------------------------------------------------------------------
+ * Project "5.1: Control and Trajectory Tracking for Autonomous Vehicles"
+ * Authors     : Mathilde Badoual.
+ *
+ * Modified by : Jonathan L. Moran (jonathan.moran107@gmail.com)
+ *
+ * Purpose of this file: Implements the PID controller.
+ * ----------------------------------------------------------------------------
+ */
 
 #include "pid_controller.h"
-#include <vector>
-#include <iostream>
-#include <math.h>
 
-using namespace std;
 
 PID::PID() {}
-
 PID::~PID() {}
 
-void PID::Init(double Kp, double Ki, double Kd, double output_lim_max, double output_lim_min) {
-   /**
-   * TODO: Initialize PID coefficients (and errors, if needed)
-   **/
-   this->Kp = Kp;
-   this->Ki = Ki;
-   this->Kd = Kd;
-   this->output_lim_max = output_lim_max;
-   this->output_lim_min = output_lim_min;
-   cte0 = 0;
-   I = 0;
+
+/* Initialises the PID controller parameters with the given values.
+ *
+ * @param  k_p             Gain value to use for the proportional term.
+ * @param  k_i             Gain value to use for the integral term.
+ * @param  k_d             Gain value to use for the derivative term.
+ * @param  lim_max_output  Maximum output value (used to threshold controller).
+ * @param  lim_min_output  Minimum output value (used to threshold controller).
+ */
+void PID::init_controller(
+    double k_p,
+    double k_i,
+    double k_d,
+    double lim_max_output,
+    double lim_min_output
+) {
+  this->k_p = k_p;
+  this->k_i = k_i;
+  this->k_d = k_d;
+  this->lim_max_output = lim_max_output;
+  this->lim_min_output = lim_min_output;
+  this->delta_t = 0.0;
+  this->error_p = 0.0;
+  this->error_i = 0.0;
+  this->error_d = 0.0;
 }
 
-void PID::UpdateError(double cte) {
-  /**
-  * TODO: Update PID errors based on cte.
-  **/
-  if(abs(delta_time) < 0.000001) return;
-  double P = Kp * cte;
-  I += Ki * cte * delta_time;
-  double D = Kd * (cte - cte0) / delta_time;
-  action = P + I + D;
-  cte0 = cte;
+
+/* Updates the PID controller terms using the given cross-track error.
+ *
+ * @param  cte    Current cross-track error value.
+ */
+void PID::update_error(
+    double cte
+) {
+  // Update the proportional-gain error
+  this->error_p = cte;
+  // Update the derivative-gain error term
+  if (this->delta_t > 0.0) {
+    // The $\dot{cte}$ term, i.e., the derivative of CTE w.r.t. $\Delta t$
+    this->error_d = (cte - error_p) / this->delta_t;
+  }
+  else {
+    // Divide by zero: set resulting derivative error to 0.0
+    this->error_d = 0.0;
+  }
+  // Update the integral-gain error term
+  this->error_i += cte * this->delta_t;
 }
 
-double PID::TotalError() {
-   /**
-   * TODO: Calculate and return the total error
-    * The code should return a value in the interval [output_lim_mini, output_lim_maxi]
-   */
-    double control = action;
-    if (control < output_lim_min) control = output_lim_min;
-    if (control > output_lim_max) control = output_lim_max;
+
+/* Evaluates the PID controller expression and returns the control value.
+ *
+ * @returns  control  Total computed error, should be within the range
+ *                    [`lim_max_output`, `lim_min_output`].
+ */
+double PID::total_error() {
+
+  double control = ((this->k_p * this->error_p)
+                    + (this->k_d * this->error_d)
+                    + (this->k_i * this->error_i)
+  );
+  // Filter `control` values outside minimum / maximum range
+  // NOTE: value outside the range is clipped to limit
+  if (control > this->lim_max_output) {
+    return this->lim_max_output;
+  }
+  else if (control < this->lim_min_output) {
+    return this->lim_min_output;
+  }
+  else {
+    // No need to clip, return value as-is
     return control;
+  }
 }
 
-double PID::UpdateDeltaTime(double new_delta_time) {
-   /**
-   * TODO: Update the delta time with new value
-   */
-   delta_time = new_delta_time;
-   return delta_time;
+
+/* Updates $\Delta t$ to the given value.
+ *
+ * @param    new_delta_time  Elapsed time interval (s) value to set.
+ * @returns  delta_time      Updated time interval (s).
+ */
+double PID::update_delta_time(
+    double new_delta_time
+) {
+  this->delta_t = new_delta_time;
+  return this->delta_t;
 }
