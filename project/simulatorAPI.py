@@ -6,7 +6,7 @@
 # This work is licensed under the terms of the MIT license.
 # For a copy, see <https://opensource.org/licenses/MIT>.
 
-#/**********************************************
+# /**********************************************
 # * Self-Driving Car Nano-degree - Udacity
 # *  Created on: September 20, 2020
 # *      Author: Munir Jojo-Verge
@@ -22,7 +22,6 @@ Welcome to CARLA path planning
 """
 
 from __future__ import print_function
-
 
 # ==============================================================================
 # -- find carla module ---------------------------------------------------------
@@ -41,7 +40,6 @@ try:
         'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
 except IndexError:
     pass
-
 
 # ==============================================================================
 # -- imports -------------------------------------------------------------------
@@ -63,6 +61,7 @@ import weakref
 import asyncio
 import json
 from websocket import create_connection
+import traceback
 
 way_points = []
 v_points = []
@@ -74,6 +73,7 @@ obst_y = []
 spiral_idx = []
 last_move_time = -1
 update_cycle = True
+end_simulation = False
 velocity = 0
 
 _prev_junction_id = -1
@@ -96,7 +96,7 @@ _view_yaw_change = 0
 _view_pitch = 0
 _view_pitch_change = 0
 
-ws=create_connection("ws://localhost:4567")
+ws = create_connection("ws://localhost:4567")
 
 try:
     import pygame
@@ -123,16 +123,21 @@ def get_actor_display_name(actor, truncate=250):
     name = ' '.join(actor.type_id.replace('_', '.').title().split('.')[1:])
     return (name[:truncate - 1] + u'\u2026') if len(name) > truncate else name
 
+
 def magnitude(vector):
-    return math.sqrt(vector.x*vector.x+vector.y*vector.y+vector.z*vector.z)
+    return math.sqrt(vector.x * vector.x + vector.y * vector.y + vector.z * vector.z)
+
 
 def distance_lookahead(velocity_mag, accel_mag, time=1.5, min_distance=8.0, max_distance=20.0):
-    return max( min(velocity_mag * time + 0.5 * accel_mag * time * time, max_distance), min_distance)
+    return max(min(velocity_mag * time + 0.5 * accel_mag * time * time, max_distance), min_distance)
 
 
 # ==============================================================================
 # -- World ---------------------------------------------------------------------
 # ==============================================================================
+
+def get_way_points_string(way_points):
+    return f"{len(way_points)} way points ({way_points[0].location.x:.2f}, {way_points[0].location.y:.2f}, {v_points[0]:.2f}m/s) -> ({way_points[-1].location.x:.2f}, {way_points[-1].location.y:.2f}, {v_points[-1]:.2f}m/s)"
 
 
 class World(object):
@@ -157,9 +162,9 @@ class World(object):
         self.world.on_tick(hud.on_world_tick)
         self.spectator = self.world.get_spectator()
 
-    def get_waypoint(self, pos_x, pos_y):
+    def get_waypoint(self, pos_x, pos_y, current_location):
         global _prev_junction_id, _tl_state, _road_height, _road_pitch, _road_roll
-        position = carla.Location(x= pos_x, y= pos_y)
+        position = carla.Location(x=pos_x, y=pos_y)
         waypoint = self.map.get_waypoint(position, project_to_road=True, lane_type=(carla.LaneType.Driving))
         _road_height = waypoint.transform.location.z
         _road_pitch = waypoint.transform.rotation.pitch
@@ -170,19 +175,27 @@ class World(object):
 
             if self.player.is_at_traffic_light():
 
-                 #Change a red traffic light to green
-                traffic_light =  self.player.get_traffic_light()
+                # Change a red traffic light to green
+                traffic_light = self.player.get_traffic_light()
                 if traffic_light.get_state() == carla.TrafficLightState.Red:
                     traffic_light.set_state(carla.TrafficLightState.Green)
                     traffic_light.set_green_time(4.0)
 
-
                 _tl_state = str(carla.TrafficLightState.Green)
 
-            return point.x, point.y, waypoint.transform.rotation.yaw * math.pi/180, False
+            return point.x, point.y, waypoint.transform.rotation.yaw * math.pi / 180, False
 
-        waypoint = waypoint.next(distance_lookahead(magnitude(self.player.get_velocity() ), magnitude(self.player.get_acceleration() ) ))[0]
-        point = waypoint.transform.location
+        # Get a new final waypoint (goal for the client) based on the current acceleration and velocity
+        # However if this new position is already very far away from the vehicle then simply return the current last
+        # waypoint, otherwise there can be so many obstacles inbetween that all paths will end up colliding,
+        # rendering the whole simulation useless
+        max_total_lookahead_distance = 20
+        if current_location.distance(position) < max_total_lookahead_distance:
+            waypoint = waypoint.next(
+                distance_lookahead(magnitude(self.player.get_velocity()), magnitude(self.player.get_acceleration())))[0]
+            point = waypoint.transform.location
+        else:
+            point = waypoint.transform.location
 
         not_junction = [475, 1168, 82, 1932]
 
@@ -199,7 +212,7 @@ class World(object):
             else:
                 _prev_junction_id = cur_junction_id
 
-        return point.x, point.y, waypoint.transform.rotation.yaw * math.pi/180, is_goal_junction
+        return point.x, point.y, waypoint.transform.rotation.yaw * math.pi / 180, is_goal_junction
 
     def move(self, sim_time, res=1):
         global way_points, v_points, last_move_time, velocity, _prev_yaw, _view_yaw, _view_pitch, _view_radius, _pivot, steer, throttle, forward_speed
@@ -207,42 +220,71 @@ class World(object):
         start = carla.Transform()
         end = carla.Transform()
 
-#         # draw spirals
-#         height_plot_scale = 1.0
-#         height_plot_offset = 1.0
-#         blue = carla.Color(r=0, g=0, b=255)
-#         green = carla.Color(r=0, g=255, b=0)
-#         red = carla.Color(r=255, g=0, b=0)
-#         for i in range(len(spirals_x)):
-#             previous_index = 0
-#             previous_speed = 0
-#             start = carla.Transform()
-#             end = carla.Transform()
-#             color = blue
-#             if i == spiral_idx[-1]:
-#                 color = green
-#             elif i in spiral_idx[:-1]:
-#                 color = red
-#             for index in range(1, len(spirals_x[i])):
-#                 start.location.x = spirals_x[i][previous_index]
-#                 start.location.y = spirals_y[i][previous_index]
-#                 end.location.x = spirals_x[i][index]
-#                 end.location.y = spirals_y[i][index]
-#                 start.location.z = height_plot_scale * spirals_v[i][previous_index] + height_plot_offset + _road_height
-#                 end.location.z =  height_plot_scale * spirals_v[i][index] + height_plot_offset + _road_height
-#                 self.world.debug.draw_line(start.location, end.location, 0.1, color, .1)
-#                 previous_index = index
+        height_plot_scale = 1.0
+        height_plot_offset = 1.0
+        blue = carla.Color(r=0, g=0, b=255)
+        green = carla.Color(r=0, g=255, b=0)
+        red = carla.Color(r=255, g=0, b=0)
 
+        # draw spirals
+        if True:
+            for i in range(len(spirals_x)):
+                previous_index = 0
+                previous_speed = 0
+                start = carla.Transform()
+                end = carla.Transform()
+                color = blue
+                if len(spiral_idx) > 0 and i == spiral_idx[-1]:
+                    color = green
+                elif i in spiral_idx[:-1] or not len(
+                        spiral_idx):  # NOTE: The function in the client is inconsistent: if there is at least one
+                    # valid spiral then all collision spirals are also added to spiral_idx.
+                    # If there is no valid spiral then NONE of them are added, so I have added
+                    # this as a special case to the visualization.
+                    color = red
+                for index in range(1, len(spirals_x[i])):
+                    start.location.x = spirals_x[i][previous_index]
+                    start.location.y = spirals_y[i][previous_index]
+                    end.location.x = spirals_x[i][index]
+                    end.location.y = spirals_y[i][index]
+                    start.location.z = height_plot_scale * spirals_v[i][
+                        previous_index] + height_plot_offset + _road_height
+                    end.location.z = height_plot_scale * spirals_v[i][index] + height_plot_offset + _road_height
+                    self.world.debug.draw_line(start.location, end.location, 0.1, color, .1)
+                    previous_index = index
 
-#         # draw path
-#         previous_index = 0
-#         for index in range(res, len(way_points), res):
-#             start.location = way_points[previous_index].location
-#             end.location = way_points[index].location
-#             start.location.z = height_plot_scale * v_points[previous_index] + height_plot_offset + _road_height
-#             end.location.z = height_plot_scale * v_points[index] + height_plot_offset + _road_height
-#             self.world.debug.draw_line(start.location, end.location, 0.1, carla.Color(r=125, g=125, b=0), .1)
-#             previous_index = index
+        # FIXME remove this?
+        if len(way_points) > 1:
+            # yaw = math.atan2(way_points[1].location.y-way_points[0].location.y, way_points[1].location.x-way_points[0].location.x)
+            yaw = self.player.get_transform().rotation.yaw / 180 * math.pi  # + math.pi / 2.0
+            start = carla.Transform()
+            end = carla.Transform()
+            target_vec = (
+            way_points[2].location.x - way_points[0].location.x, way_points[2].location.y - way_points[0].location.y)
+            norm_of_lane = (- math.sin(yaw), math.cos(yaw))
+            dot_prod = target_vec[0] * norm_of_lane[0] + target_vec[1] * norm_of_lane[1];
+            target_vec_in_norm_direction = dot_prod / math.sqrt(norm_of_lane[0] ** 2 + norm_of_lane[1] ** 2);
+
+            start.location.x = way_points[0].location.x
+            start.location.y = way_points[0].location.y
+            start.location.z = _road_height + 1
+            # end.location.x = way_points[0].location.x - math.sin(yaw) * 10
+            # end.location.y = way_points[0].location.y + math.cos(yaw) * 10
+            end.location.x = way_points[0].location.x + 2 * target_vec_in_norm_direction * norm_of_lane[0]
+            end.location.y = way_points[0].location.y + 2 * target_vec_in_norm_direction * norm_of_lane[1]
+            end.location.z = _road_height + 1
+            self.world.debug.draw_line(start.location, end.location, 0.1, carla.Color(r=125, g=125, b=125), .1)
+
+        # draw path
+        if True:
+            previous_index = 0
+            for index in range(res, len(way_points), res):
+                start.location = way_points[previous_index].location
+                end.location = way_points[index].location
+                start.location.z = height_plot_scale * v_points[previous_index] + height_plot_offset + _road_height
+                end.location.z = height_plot_scale * v_points[index] + height_plot_offset + _road_height
+                self.world.debug.draw_line(start.location, end.location, 0.1, carla.Color(r=125, g=125, b=0), .1)
+                previous_index = index
 
         # increase wait time for debug
         wait_time = 0.0
@@ -250,8 +292,13 @@ class World(object):
         if (sim_time - last_move_time) > wait_time:
             last_move_time = sim_time
             # move car using interpolation based on the velocity label form trajectory points
+            waypoints_before = get_way_points_string(way_points)
             if len(way_points) > 1:
-                yaw = math.atan2(way_points[1].location.y-way_points[0].location.y, way_points[1].location.x-way_points[0].location.x)
+                # NOTE: This is NOT the same yaw that Carla calculates, which is VERY confusing, because later this gets sent to the
+                # client as well. I have additionally sent the yaw calculated by Carla, because that works well. I do not understand
+                # why this is calculated the way it is.
+                yaw = math.atan2(way_points[1].location.y - way_points[0].location.y,
+                                 way_points[1].location.x - way_points[0].location.x)
                 velocity = v_points[0]
                 if velocity < 0.01 or _active_maneuver == 3:
                     yaw = _prev_yaw
@@ -260,27 +307,30 @@ class World(object):
                 else:
                     _prev_yaw = yaw
                     D = velocity * delta_t
-                    d_interval = math.sqrt( (way_points[1].location.x - way_points[0].location.x )**2 + (way_points[1].location.y - way_points[0].location.y )**2  )
+                    d_interval = math.sqrt((way_points[1].location.x - way_points[0].location.x) ** 2 + (
+                                way_points[1].location.y - way_points[0].location.y) ** 2)
                     while d_interval < D and len(way_points) > 2:
                         D -= d_interval
                         way_points.pop(0)
                         v_points.pop(0)
-                        d_interval = math.sqrt( (way_points[1].location.x - way_points[0].location.x )**2 + (way_points[1].location.y - way_points[0].location.y )**2  )
+                        d_interval = math.sqrt((way_points[1].location.x - way_points[0].location.x) ** 2 + (
+                                    way_points[1].location.y - way_points[0].location.y) ** 2)
                     if abs(d_interval) < 1e-6:
                         yaw = 0.
                     else:
                         ratio = D / d_interval
-                        v_points[0] = ratio * (v_points[1]-v_points[0]) + v_points[0]
-                        way_points[0].location.x = ratio * (way_points[1].location.x - way_points[0].location.x) + way_points[0].location.x
-                        way_points[0].location.y = ratio * (way_points[1].location.y - way_points[0].location.y) + way_points[0].location.y
-                        yaw = math.atan2(way_points[1].location.y-way_points[0].location.y, way_points[1].location.x-way_points[0].location.x)
-
+                        v_points[0] = ratio * (v_points[1] - v_points[0]) + v_points[0]
+                        way_points[0].location.x = ratio * (way_points[1].location.x - way_points[0].location.x) + \
+                                                   way_points[0].location.x
+                        way_points[0].location.y = ratio * (way_points[1].location.y - way_points[0].location.y) + \
+                                                   way_points[0].location.y
+                        yaw = math.atan2(way_points[1].location.y - way_points[0].location.y,
+                                         way_points[1].location.x - way_points[0].location.x)
 
                 way_points[0].rotation.yaw = yaw * 180 / math.pi
                 way_points[0].rotation.pitch = _road_pitch
                 way_points[0].rotation.roll = _road_roll
                 way_points[0].location.z = _road_height
-
 
                 _pivot = carla.Transform()
                 _pivot.location = self.player.get_transform().location
@@ -289,7 +339,7 @@ class World(object):
                 _view_yaw += _view_yaw_change
                 _view_pitch += _view_pitch_change
                 _view_radius += _view_radius_change
-                _view_radius = min( max(10, _view_radius), 100)
+                _view_radius = min(max(10, _view_radius), 100)
                 while _view_yaw < -math.pi:
                     _view_yaw += math.pi
                 while _view_yaw > math.pi:
@@ -298,13 +348,23 @@ class World(object):
                     _view_pitch += math.pi
                 while _view_pitch > math.pi:
                     _view_pitch -= math.pi
-                _pivot.rotation.yaw  = _view_yaw * 180 / math.pi
-                _pivot.rotation.pitch  = _view_pitch * 180 / math.pi
+                _pivot.rotation.yaw = _view_yaw * 180 / math.pi
+                _pivot.rotation.pitch = _view_pitch * 180 / math.pi
                 _pivot.location.z += 2 + _view_radius * math.sin(math.pi + _view_pitch)
                 # Teleports the actor to a given transform (location and rotation):
-#                 self.player.set_transform(way_points[0])
-                self.player.apply_control(carla.VehicleControl(throttle=throttle, steer=steer, brake=brake))
+                #                 self.player.set_transform(way_points[0])
 
+                # NOTE: by default Carla automatically changes gears at different speeds, which causes
+                # variations in longitudinal control. This should be taken into account in the PID controller,
+                # which I didn't really want to do.. so instead I hard-coded a single gear for now.
+                # https://github.com/carla-simulator/carla/issues/269
+                self.player.apply_control(carla.VehicleControl(throttle=throttle, steer=steer, brake=brake,
+                                                               manual_gear_shift=True, gear=1
+                                                               ))
+
+                # print(f"Gear: {self.player.get_control().gear}")
+
+                # print(f"[{sim_time}] Update world. Waypoints before: {waypoints_before}, after: {get_way_points_string(way_points)}")
 
     def restart(self):
         self.player_max_speed = 1.589
@@ -313,15 +373,15 @@ class World(object):
         cam_index = self.camera_manager.index if self.camera_manager is not None else 0
         cam_pos_index = self.camera_manager.transform_index if self.camera_manager is not None else 0
         # Get a random blueprint.
-        #blueprint = random.choice(self.world.get_blueprint_library().filter(self._actor_filter))
+        # blueprint = random.choice(self.world.get_blueprint_library().filter(self._actor_filter))
         blueprint = self.world.get_blueprint_library().filter(self._actor_filter)[12]
-        #cars = self.world.get_blueprint_library().filter(self._actor_filter)
-        #for car in cars:
+        # cars = self.world.get_blueprint_library().filter(self._actor_filter)
+        # for car in cars:
         #    print(car)
         blueprint.set_attribute('role_name', self.actor_role_name)
         if blueprint.has_attribute('color'):
             color = random.choice(blueprint.get_attribute('color').recommended_values)
-            #print(blueprint.get_attribute('color').recommended_values)
+            # print(blueprint.get_attribute('color').recommended_values)
             blueprint.set_attribute('color', color)
         if blueprint.has_attribute('driver_id'):
             driver_id = random.choice(blueprint.get_attribute('driver_id').recommended_values)
@@ -343,8 +403,8 @@ class World(object):
                 print('Please add some Vehicle Spawn Point to your UE4 scene.')
                 sys.exit(1)
             spawn_point = self.map.get_spawn_points()[1]
-            #print(len(spawn_points))
-            #spawn_point = random.choice(spawn_points) if spawn_points else carla.Transform()
+            # print(len(spawn_points))
+            # spawn_point = random.choice(spawn_points) if spawn_points else carla.Transform()
             self.player = self.world.try_spawn_actor(blueprint, spawn_point)
 
             '''
@@ -384,6 +444,7 @@ class World(object):
         if self.player is not None:
             self.player.destroy()
 
+
 # ==============================================================================
 # -- HUD -----------------------------------------------------------------------
 # ==============================================================================
@@ -419,7 +480,7 @@ class HUD(object):
             return
         t = world.player.get_transform()
         real_v = world.player.get_velocity()
-        v = math.sqrt(real_v.x**2 + real_v.y**2)
+        v = math.sqrt(real_v.x ** 2 + real_v.y ** 2)
         c = world.player.get_control()
         colhist = world.collision_sensor.get_collision_history()
         collision = [colhist[x + self.frame - 200] for x in range(0, 200)]
@@ -455,15 +516,15 @@ class HUD(object):
             behavior = 'DECEL TO STOP'
         else:
             behavior = 'STOPPED'
-        self._info_text += ['Behavior: '+behavior]
-        self._info_text += ['Prev Junction: '+str(_prev_junction_id)]
+        self._info_text += ['Behavior: ' + behavior]
+        self._info_text += ['Prev Junction: ' + str(_prev_junction_id)]
         if _tl_state is not 'none':
-            self._info_text += ['TL State: '+_tl_state]
-        self._info_text += ['num waypoints: '+str(len(way_points))]
+            self._info_text += ['TL State: ' + _tl_state]
+        self._info_text += ['num waypoints: ' + str(len(way_points))]
         num_spirals = len(spirals_x)
-        spirals_coll = max(len(spiral_idx)-1, 0)
+        spirals_coll = max(len(spiral_idx) - 1, 0)
         spirals_free = str(num_spirals - spirals_coll)
-        self._info_text += ['Spirals: '+spirals_free+' / '+str(num_spirals)]
+        self._info_text += ['Spirals: ' + spirals_free + ' / ' + str(num_spirals)]
 
     def notification(self, text, seconds=2.0):
         self._notifications.set_text(text, seconds=seconds)
@@ -546,6 +607,7 @@ class FadingText(object):
 
 class HelpText(object):
     """Helper class to handle text output using pygame"""
+
     def __init__(self, font, width, height):
         lines = __doc__.split('\n')
         self.font = font
@@ -602,7 +664,7 @@ class CollisionSensor(object):
         actor_type = get_actor_display_name(event.other_actor)
         self.hud.notification('Collision with %r' % actor_type)
         impulse = event.normal_impulse
-        intensity = math.sqrt(impulse.x**2 + impulse.y**2 + impulse.z**2)
+        intensity = math.sqrt(impulse.x ** 2 + impulse.y ** 2 + impulse.z ** 2)
         self.history.append((event.frame, intensity))
         if len(self.history) > 4000:
             self.history.pop(0)
@@ -635,6 +697,7 @@ class LaneInvasionSensor(object):
         text = ['%r' % str(x).split()[-1] for x in lane_types]
         self.hud.notification('Crossed line %s' % ' and '.join(text))
 
+
 # ==============================================================================
 # -- CameraManager -------------------------------------------------------------
 # ==============================================================================
@@ -650,7 +713,9 @@ class CameraManager(object):
         bound_y = 0.5 + self._parent.bounding_box.extent.y
         Attachment = carla.AttachmentType
         self._camera_transforms = [
-            carla.Transform(carla.Location(x=-9.5+parent_actor.get_transform().location.x, y= parent_actor.get_transform().location.y, z=3.5), carla.Rotation(pitch=8.0, yaw= parent_actor.get_transform().rotation.yaw)),
+            carla.Transform(carla.Location(x=-9.5 + parent_actor.get_transform().location.x,
+                                           y=parent_actor.get_transform().location.y, z=3.5),
+                            carla.Rotation(pitch=8.0, yaw=parent_actor.get_transform().rotation.yaw)),
             (carla.Transform(carla.Location(x=1.6, z=1.7)), Attachment.SpringArm),
             (carla.Transform(carla.Location(x=5.5, y=1.5, z=1.5)), Attachment.SpringArm),
             (carla.Transform(carla.Location(x=-8.0, z=6.0), carla.Rotation(pitch=6.0)), Attachment.SpringArm),
@@ -659,10 +724,10 @@ class CameraManager(object):
         self.sensors = [
             ['sensor.camera.rgb', cc.Raw, 'Camera RGB', {}],
             ['sensor.camera.rgb', cc.Raw, 'Camera RGB Distorted',
-                {'lens_circle_multiplier': '3.0',
-                'lens_circle_falloff': '3.0',
-                'chromatic_aberration_intensity': '0.5',
-                'chromatic_aberration_offset': '0'}]]
+             {'lens_circle_multiplier': '3.0',
+              'lens_circle_falloff': '3.0',
+              'chromatic_aberration_intensity': '0.5',
+              'chromatic_aberration_offset': '0'}]]
         world = self._parent.get_world()
         bp_library = world.get_blueprint_library()
         for item in self.sensors:
@@ -689,8 +754,8 @@ class CameraManager(object):
             self.sensor = self._parent.get_world().spawn_actor(
                 self.sensors[index][-1],
                 self._camera_transforms[self.transform_index])
-                #attach_to=self._parent,
-                #attachment_type=self._camera_transforms[self.transform_index][1])
+            # attach_to=self._parent,
+            # attachment_type=self._camera_transforms[self.transform_index][1])
             # We need to pass the lambda a weak reference to self to avoid
             # circular reference.
             weak_self = weakref.ref(self)
@@ -703,7 +768,7 @@ class CameraManager(object):
         if self.surface is not None:
             display.blit(self.surface, (0, 0))
 
-        self._camera_transforms[self.transform_index] =_pivot
+        self._camera_transforms[self.transform_index] = _pivot
         self.sensor.set_transform(_pivot)
 
     @staticmethod
@@ -729,6 +794,7 @@ class CameraManager(object):
             array = array[:, :, ::-1]
             self.surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
 
+
 # ==============================================================================
 # -- KeyboardControl -----------------------------------------------------------
 # ==============================================================================
@@ -736,6 +802,7 @@ class CameraManager(object):
 
 class KeyboardControl(object):
     """Class that handles keyboard input."""
+
     def __init__(self, world):
         print("init keyboard control")
 
@@ -773,7 +840,7 @@ def SpawnNPC(client, world, args, offset_x, offset_y):
     global obst_x, obst_y
     SpawnActor = carla.command.SpawnActor
     blueprint = client.get_world().get_blueprint_library().filter(args.filter)[5]
-    actor_spawn =  carla.Transform()
+    actor_spawn = carla.Transform()
     spawn_point = world.map.get_spawn_points()[1]
     actor_spawn.location = spawn_point.location
     actor_spawn.rotation = spawn_point.rotation
@@ -782,12 +849,13 @@ def SpawnNPC(client, world, args, offset_x, offset_y):
     obst_x.append(actor_spawn.location.x)
     obst_y.append(actor_spawn.location.y)
 
-
     return SpawnActor(blueprint, actor_spawn)
+
 
 @asyncio.coroutine
 def game_loop(args):
     global update_cycle
+    global end_simulation
     pygame.init()
     pygame.font.init()
     world = None
@@ -811,9 +879,11 @@ def game_loop(args):
 
         # Spawn some obstacles to avoid
         batch = []
-        batch.append(SpawnNPC(client, world, args, 30, 1.5))
-        batch.append(SpawnNPC(client, world, args, 65, -3 *1.5))
-        batch.append(SpawnNPC(client, world, args, 110, -1 * 1.5))
+        if args.add_obstacles:
+            print(f"Add obstacles in simulatorAPI: {args.add_obstacles}")
+            batch.append(SpawnNPC(client, world, args, 30, 1.5))
+            batch.append(SpawnNPC(client, world, args, 65, -3 * 1.5))
+            batch.append(SpawnNPC(client, world, args, 110, -1 * 1.5))
 
         for response in carla.Client.apply_batch_sync(client, batch):
             if response.error:
@@ -823,42 +893,62 @@ def game_loop(args):
 
         start_time = world.hud.simulation_time
 
-#         measurement_data, sensor_data = client.read_data()
-#         forward_speed = measurement_data.player_measurements.forward_speed
+        #         measurement_data, sensor_data = client.read_data()
+        #         forward_speed = measurement_data.player_measurements.forward_speed
 
-        while True:
-            yield from asyncio.sleep(0.01) # check if any data from the websocket
+        last_message_time = start_time
+        while not end_simulation:  # end_simulation is set when receiving the closing message from pid_controller
+            yield from asyncio.sleep(0.01)  # check if any data from the websocket
 
             if controller.parse_events(client, world):
                 return
 
             if len(way_points) == 0:
+                # NOTE: This should only happen during the first iteration
                 player = world.player.get_transform()
                 way_points.append(player)
                 v_points.append(0)
 
-
             sim_time = world.hud.simulation_time - start_time
 
-            if update_cycle and (len(way_points) < _update_point_thresh):
-
+            # NOTE: Originally the updates were sent based on the number of remaining waypoints. Waypoints were generated
+            # at equal distances by the planner, so this resulted in the fact that the time between two messages sent
+            # to the client depended on the vehicle velocity and acceleration. This made it extremely difficult to
+            # control the car, because the time difference between two messages were in the range of 0.5-4.5 seconds,
+            # and between two messages the simulator kept applying the last received control input, causing
+            # extreme oscillations.
+            # In order to overcome this it is now forced that an update is sent at even times, even if the simulator has
+            # all the waypoints, which resulted in much smoother control.
+            # if update_cycle and (len(way_points) < _update_point_thresh):
+            if update_cycle and ((len(way_points) < _update_point_thresh) or (sim_time - last_message_time) > 0.2):
                 update_cycle = False
-                # print("sending data")
-
-                x_points = [point.location.x for point in way_points]
-                y_points = [point.location.y for point in way_points]
-                yaw = way_points[0].rotation.yaw * math.pi / 180
-                waypoint_x, waypoint_y, waypoint_t, waypoint_j = world.get_waypoint(x_points[-1], y_points[-1])
-                real_v = world.player.get_velocity()
-                velocity = math.sqrt(real_v.x**2 + real_v.y**2)
-                print('velocity sent: ', velocity)
+                # print("Sending data to client")
 
                 t = world.player.get_transform()
                 location_x = t.location.x
                 location_y = t.location.y
                 location_z = t.location.z
 
-                ws.send(json.dumps({'traj_x': x_points, 'traj_y': y_points, 'traj_v': v_points ,'yaw': _prev_yaw, "velocity": velocity, 'time': sim_time, 'waypoint_x': waypoint_x, 'waypoint_y': waypoint_y, 'waypoint_t': waypoint_t, 'waypoint_j': waypoint_j, 'tl_state': _tl_state, 'obst_x': obst_x, 'obst_y': obst_y, 'location_x': location_x, 'location_y': location_y, 'location_z': location_z } ))
+                x_points = [point.location.x for point in way_points]
+                y_points = [point.location.y for point in way_points]
+                yaw = way_points[0].rotation.yaw * math.pi / 180
+                waypoint_x, waypoint_y, waypoint_t, waypoint_j = world.get_waypoint(x_points[-1], y_points[-1],
+                                                                                    t.location)
+                real_v = world.player.get_velocity()
+                velocity = math.sqrt(real_v.x ** 2 + real_v.y ** 2)
+                carla_yaw = world.player.get_transform().rotation.yaw / 180 * math.pi
+                # print(f"velocity sent: {velocity:.02f}")
+
+                # print(f"[{sim_time}] Message sent to client. Waypoints: {get_way_points_string(way_points)}")
+
+                ws.send(json.dumps({'traj_x': x_points, 'traj_y': y_points, 'traj_v': v_points,
+                                    'yaw': _prev_yaw, "carla_yaw": carla_yaw,
+                                    "velocity": velocity, 'time': sim_time, 'waypoint_x': waypoint_x,
+                                    'waypoint_y': waypoint_y, 'waypoint_t': waypoint_t, 'waypoint_j': waypoint_j,
+                                    'tl_state': _tl_state, 'obst_x': obst_x, 'obst_y': obst_y, 'location_x': location_x,
+                                    'location_y': location_y, 'location_z': location_z}))
+
+                last_message_time = sim_time
 
             clock.tick_busy_loop(60)
             world.tick(clock)
@@ -869,7 +959,7 @@ def game_loop(args):
 
     except Exception as error:
         print('EXCEPTION IN GAME LOOP:')
-        print(error)
+        traceback.print_exc()
 
     finally:
 
@@ -888,9 +978,13 @@ def game_loop(args):
 
 
 def get_data():
-    global way_points, v_points, update_cycle, spirals_x, spirals_y, spirals_v, spiral_idx, _active_maneuver, steer, throttle, brake
-    data = ws.recv() # blocking call, thats why we use asyncio
+    global way_points, v_points, update_cycle, end_simulation, spirals_x, spirals_y, spirals_v, spiral_idx, _active_maneuver, steer, throttle, brake, _update_point_thresh
+    data = ws.recv()  # blocking call, thats why we use asyncio
     data = json.loads(str(data))
+    if 'close' in data:
+        print("Closing")
+        end_simulation = True
+        raise StopAsyncIteration()
     dist_thresh = 0.1
     closest_dist = 1000
     start_index = 0
@@ -905,32 +999,39 @@ def get_data():
     throttle = data['throttle']
     brake = data['brake']
 
-    print('steer: ', steer)
-    print('throttle: ', throttle)
-    print('brake: ', brake)
+    # print(f"steer: {steer:.02f}, throttle: {throttle:.02f}, brake: {brake:.02f}")
+
+    waypoints_before = get_way_points_string(way_points)
 
     # Start at the point that is closest to the start way point
-    if( len(way_points) > 1):
+    if (len(way_points) > 1):
         for path_index in range(len(data['trajectory_x'])):
 
             new_x = data['trajectory_x'][path_index]
             new_y = data['trajectory_y'][path_index]
-            dist = math.sqrt(math.pow(new_x-way_points[1].location.x, 2)+math.pow(new_y-way_points[1].location.y, 2))
+            dist = math.sqrt(
+                math.pow(new_x - way_points[1].location.x, 2) + math.pow(new_y - way_points[1].location.y, 2))
+            # print(f"path_index {path_index} d {dist}")
             if dist < dist_thresh:
-                start_index = max(path_index-1,0)
+                start_index = max(path_index - 1, 0)
+                # print(f"threshold met")
                 break
             elif dist < closest_dist:
-                start_index = max(path_index-1,0)
+                start_index = max(path_index - 1, 0)
                 closest_dist = dist
-            if path_index is len(data['trajectory_x'])-1:
-                print("WARNING: distance start threshold not met ", closest_dist)
+                # print(f"closest")
+            if path_index is len(data['trajectory_x']) - 1:
+                # print(f"path_index {path_index} is len(data['trajectory_x'])-1 {len(data['trajectory_x'])-1}")
+                # print("WARNING: distance start threshold not met ", closest_dist)
+                pass
 
-    #print("start index ", start_index) # test if start_index is moving
+    # print("start index ", start_index) # test if start_index is moving
 
     x_set = data['trajectory_x'][start_index:]
     y_set = data['trajectory_y'][start_index:]
     v_set = data['trajectory_v'][start_index:]
-    _update_point_thresh = data['update_point_thresh']
+    _update_point_thresh = data[
+        'update_point_thresh']  # NOTE: this variable was not marked as global at the beginning of this function, so this setting had previously no effect
 
     for path_index in range(len(x_set)):
         new_x = x_set[path_index]
@@ -949,12 +1050,23 @@ def get_data():
             v_points[path_index] = new_v
 
     update_cycle = True
+    # print(f"[?] Message received from client. Waypoints before: {waypoints_before}, after: {get_way_points_string(way_points)}")
 
 
 @asyncio.coroutine
 def ws_event(loop):
     while True:
-        yield from loop.run_in_executor(None, get_data)
+        try:
+            yield from loop.run_in_executor(None, get_data)
+        except StopAsyncIteration:
+            print("Got that exception")
+            break
+        except Exception as e:
+            print("Unknown exception in get_data")
+            traceback.print_exc()
+            break
+    print("Ended ws event loop")
+
 
 def main():
     argparser = argparse.ArgumentParser(
@@ -999,6 +1111,10 @@ def main():
         default=2.2,
         type=float,
         help='Gamma correction of the camera (default: 2.2)')
+    argparser.add_argument(
+        '--add_obstacles',
+        action='store_true',
+        help='Whether to add obstacles to the track (default: off)')
     args = argparser.parse_args()
 
     args.width, args.height = [int(x) for x in args.res.split('x')]
@@ -1010,7 +1126,7 @@ def main():
 
     print(__doc__)
 
-    #sio.connect('http://localhost:4567')
+    # sio.connect('http://localhost:4567')
 
     loop = asyncio.get_event_loop()
     loop.run_until_complete(
@@ -1020,6 +1136,6 @@ def main():
         ])
     )
 
-if __name__ == '__main__':
 
+if __name__ == '__main__':
     main()
