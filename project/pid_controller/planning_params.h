@@ -13,18 +13,18 @@
 #include <array>
 
 // Planning Constants
-#define P_NUM_PATHS 7
-#define P_LOOKAHEAD_MIN 8.0            // m
-#define P_LOOKAHEAD_MAX 20.0           // m
-#define P_LOOKAHEAD_TIME 1.5           // s
-#define P_GOAL_OFFSET 1.0              // m
-#define P_ERR_TOLERANCE 0.1            // m
+#define P_NUM_PATHS 13
+#define P_LOOKAHEAD_MIN 12.0            // m
+#define P_LOOKAHEAD_MAX 35.0           // m
+#define P_LOOKAHEAD_TIME 2.5           // s
+#define P_GOAL_OFFSET 0.45              // m
+#define P_ERR_TOLERANCE 1.0            // m
 #define P_TIME_GAP 1.0                 // s
 #define P_MAX_ACCEL 1.5                // m/s^2
 #define P_SLOW_SPEED 1.0               // m/s
-#define P_SPEED_LIMIT 3.0              // m/s
-#define P_STOP_LINE_BUFFER 0.5         // m
-#define P_STOP_THRESHOLD_SPEED 0.02    // m/s
+#define P_SPEED_LIMIT 5.5              // m/s
+#define P_STOP_LINE_BUFFER 1.8         // m
+#define P_STOP_THRESHOLD_SPEED 0.2    // m/s
 #define P_REQ_STOPPED_TIME 1.0         // secs
 #define P_LEAD_VEHICLE_LOOKAHEAD 20.0  // m
 #define P_REACTION_TIME 0.25           // secs

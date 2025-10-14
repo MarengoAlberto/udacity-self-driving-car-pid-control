@@ -350,9 +350,19 @@ int main () {
             * TODO (step 3): compute the steer error (error_steer) from the position and the desired trajectory
             **/
 
-            int closest_point_idx = find_closest_point_idx(x_position, y_position, x_points,y_points);
+            int idx = find_closest_point_idx(x_position, y_position, x_points, y_points);
+            idx = std::min(idx + 5, (int)x_points.size() - 1);   // lookahead 3–10 works well
 
-            error_steer = angle_between_points(x_position, y_position, x_points[closest_point_idx], y_points[closest_point_idx]) - yaw;
+            auto wrap_to_pi = [](double a){
+                while (a >  M_PI) a -= 2.0*M_PI;
+                while (a < -M_PI) a += 2.0*M_PI;
+                return a;
+            };
+
+            double yaw_rad = yaw * M_PI / 180.0;
+            double target_heading = angle_between_points(x_position, y_position,
+                                                         x_points[idx], y_points[idx]);
+            error_steer = wrap_to_pi(target_heading - yaw_rad);
 
 
             /**
@@ -387,7 +397,7 @@ int main () {
             /**
             * TODO (step 2): compute the throttle error (error_throttle) from the position and the desired speed
             **/
-            error_throttle = v_points[closest_point_idx] - velocity;
+            error_throttle = v_points[idx] - velocity;
 
             double throttle_output;
             double brake_output;
