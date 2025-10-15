@@ -259,7 +259,7 @@ int main () {
     // pid_steer.Init(0.25, 0.001, 0.7, 1.2, -1.2);
     // pid_steer.Init(0.30, 0.001, 0.7, 1.2, -1.2);
     // pid_steer.Init(0.30, 0.0011, 0.71, 1.2, -1.2);
-    pid_steer.Init(0.29, 0.0011,0.71, 1.2, -1.2);
+    pid_steer.Init(0.12, 0.0, 0.1, 1.2, -1.2);
 
 
     // initialize pid throttle
@@ -278,7 +278,7 @@ int main () {
     // pid_throttle.Init(0.20, 0.001, 0.2, 1.0, -1.0);
     // pid_throttle.Init(0.20, 0.001, 0.2, 1.0, -1.0);
     // pid_throttle.Init(0.21, 0.001, 0.2, 1.0, -1.0);
-    pid_throttle.Init(0.21,0.001,0.019, 1.0, -1.0);
+    pid_throttle.Init(0.20, 0.0015, 0.0, 1.0, -1.0);
 
     h.onMessage([&pid_steer, &pid_throttle, &new_delta_time, &timer, &prev_timer, &i, &prev_timer](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
         auto s = hasData(data);
